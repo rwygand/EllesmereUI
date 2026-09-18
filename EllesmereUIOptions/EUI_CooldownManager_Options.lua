@@ -8810,6 +8810,7 @@ initFrame:SetScript("OnEvent", function(self)
                         if t.hideChargeText then ns._cdmAnyHideChargeText = true end
                         if t.suppressGCD then ns._cdmAnySuppressGcd = true end
                         if t.chargeHideSwipe or t.hideRechargeEdge then ns._cdmAnyChargeStyle = true end
+                        if t.cooldownGlowStackEnabled then ns._cdmAnyCooldownGlowStack = true end
                         if t.cdReadySoundKey and t.cdReadySoundKey ~= "none" then ns._cdmAnyCdReadySound = true end
                         if (t.buffActiveSoundKey and t.buffActiveSoundKey ~= "none")
                             or (t.buffLostSoundKey and t.buffLostSoundKey ~= "none") then
@@ -12124,6 +12125,124 @@ initFrame:SetScript("OnEvent", function(self)
                                             t.glowColorB = nil
                                         end
                                     end } })
+
+                    -- 6. Glow at Linked Buff Stacks (cd/utility real spells): glows this icon
+                    -- when a PLAYER BUFF's stack count (picked by Spell ID) matches the
+                    -- comparison below. Some cooldown-viewer icons show a native stack overlay
+                    -- (e.g. Implosion's Wild Imp counter) that is NOT backed by an
+                    -- auraInstanceID on the icon itself -- confirmed live via
+                    -- C_UnitAuras.GetAuraSlots while Implosion's own EssentialCooldownViewer
+                    -- frame reads nil for auraInstanceID -- so the count has to be read
+                    -- independently, by the linked buff's own spell ID (Wild Imp is 296553).
+                    -- Zero cost unless enabled: gated by ns._cdmAnyCooldownGlowStack in
+                    -- RefreshCDMIconAppearance/RescanCooldownGlowStackFlag.
+                    -- MakeCogRow (the buff branch's hover-flyout cog-row widget) is a LOCAL
+                    -- defined inside "if isBuffBar or isHostedBuff then" above, so it is not in
+                    -- scope down here -- duplicated verbatim (same dependencies: inner/menu/mH/
+                    -- ITEM_H/FONT_PATH/GetCDMOptOutline/hlA/tDim*, all already in scope in this
+                    -- branch too, as the Replace with Buff/Add Custom Icon rows below prove).
+                    local function MakeCogRowCD(label, isChanged, buildCog)
+                        local row = CreateFrame("Button", nil, inner)
+                        row:SetHeight(ITEM_H)
+                        row:SetPoint("TOPLEFT", inner, "TOPLEFT", 1, -mH)
+                        row:SetPoint("TOPRIGHT", inner, "TOPRIGHT", -1, -mH)
+                        row:SetFrameLevel(menu:GetFrameLevel() + 2)
+                        local lbl = row:CreateFontString(nil, "OVERLAY")
+                        lbl:SetFont(FONT_PATH, 11, GetCDMOptOutline())
+                        lbl:SetPoint("LEFT", 10, 0); lbl:SetJustifyH("LEFT"); lbl:SetText(EllesmereUI.L(label))
+                        local function UpdateLabel()
+                            if isChanged() then
+                                local aR, aG, aB = EllesmereUI.GetAccentColor()
+                                lbl:SetTextColor(aR, aG, aB, 1)
+                            else
+                                lbl:SetTextColor(tDimR, tDimG, tDimB, tDimA)
+                            end
+                        end
+                        row._updateLabel = UpdateLabel
+                        UpdateLabel()
+                        local arrow = row:CreateTexture(nil, "ARTWORK")
+                        arrow:SetSize(10, 10); arrow:SetPoint("RIGHT", row, "RIGHT", -8, 0)
+                        arrow:SetTexture("Interface\\AddOns\\EllesmereUI\\media\\icons\\right-arrow.png")
+                        arrow:SetAlpha(0.7)
+                        local hl = row:CreateTexture(nil, "ARTWORK")
+                        hl:SetAllPoints(); hl:SetColorTexture(1, 1, 1, 0); hl:SetAlpha(0)
+                        local showFn, pf
+                        local function ShowCog()
+                            if not showFn then _, showFn = buildCog(row) end
+                            if not pf then
+                                showFn(row)
+                                pf = showFn._popupFrame
+                            else
+                                if pf._refresh then pf._refresh() end
+                                pf:Show()
+                            end
+                            if pf then
+                                pf:SetScript("OnUpdate", nil)
+                                pf:SetAlpha(1)
+                                pf:ClearAllPoints()
+                                pf:SetPoint("TOPLEFT", row, "TOPRIGHT", 2, 0)
+                            end
+                        end
+                        row:SetScript("OnEnter", function()
+                            lbl:SetTextColor(1, 1, 1, 1); hl:SetColorTexture(1, 1, 1, hlA); hl:SetAlpha(1)
+                            if menu._openSub and menu._openSub ~= pf and menu._openSub.Hide then menu._openSub:Hide() end
+                            ShowCog()
+                            menu._openSub = pf
+                        end)
+                        row:SetScript("OnLeave", function()
+                            UpdateLabel(); hl:SetAlpha(0)
+                        end)
+                        mH = mH + ITEM_H
+                        return row
+                    end
+                    MakeCogRowCD("Glow at Linked Buff Stacks", function()
+                        return ss.cooldownGlowStackEnabled == true
+                    end, function(row)
+                        return EllesmereUI.BuildCogPopup({
+                            title = "Glow at Linked Buff Stacks", noOwnerDim = true,
+                            frameStrata = "FULLSCREEN_DIALOG", frameLevel = 350,
+                            rows = {
+                                { type="toggle", label="Enabled",
+                                  tooltip="Glows this icon when a PLAYER BUFF's stack count (picked by Spell ID below) matches the comparison below.",
+                                  get=function() return ss.cooldownGlowStackEnabled == true end,
+                                  set=function(v) EnsureSS(); ss.cooldownGlowStackEnabled = v or nil; ns._cdmAnyCooldownGlowStack = true; if ns.RefreshCDMIconAppearance then ns.RefreshCDMIconAppearance(barKey) end if row._updateLabel then row._updateLabel() end end },
+                                { type="input", label="Linked Buff Spell ID", inputWidth=64, commitOnBlur=true,
+                                  tooltip="The spell ID of the player buff whose stack count drives this glow (e.g. 296553 for the Wild Imp buff behind Implosion's imp counter). Look it up on Wowhead or in-game.",
+                                  disabled=function() return not ss.cooldownGlowStackEnabled end,
+                                  disabledTooltip="Enable Glow at Linked Buff Stacks",
+                                  get=function() return ss.cooldownGlowStackSpellID and tostring(ss.cooldownGlowStackSpellID) or "" end,
+                                  set=function(v)
+                                      local id = math.floor(tonumber(v) or 0)
+                                      EnsureSS(); ss.cooldownGlowStackSpellID = (id > 0) and id or nil
+                                      if ns.RefreshCDMIconAppearance then ns.RefreshCDMIconAppearance(barKey) end
+                                      if row._updateLabel then row._updateLabel() end
+                                  end },
+                                { type="dropdown", label="Comparison",
+                                  values={ lt="Below (<)", lte="At Most (<=)", eq="Exactly (=)", gte="At Least (>=)", gt="Above (>)" },
+                                  order={ "lt", "lte", "eq", "gte", "gt" },
+                                  disabled=function() return not ss.cooldownGlowStackEnabled end,
+                                  disabledTooltip="Enable Glow at Linked Buff Stacks",
+                                  get=function() return ss.cooldownGlowStackOperator or "gte" end,
+                                  set=function(v)
+                                      EnsureSS(); ss.cooldownGlowStackOperator = v ~= "gte" and v or nil
+                                      if ns.RefreshCDMIconAppearance then ns.RefreshCDMIconAppearance(barKey) end
+                                      if row._updateLabel then row._updateLabel() end
+                                  end },
+                                { type="input", label="Stack Count", inputWidth=42, commitOnBlur=true,
+                                  disabled=function() return not ss.cooldownGlowStackEnabled end,
+                                  disabledTooltip="Enable Glow at Linked Buff Stacks",
+                                  get=function() return tostring(tonumber(ss.cooldownGlowStackThreshold) or 6) end,
+                                  set=function(v)
+                                      local t = math.floor(tonumber(v) or 0)
+                                      if t < 1 then t = 1 end
+                                      if t > 99 then t = 99 end
+                                      EnsureSS(); ss.cooldownGlowStackThreshold = t
+                                      if ns.RefreshCDMIconAppearance then ns.RefreshCDMIconAppearance(barKey) end
+                                      if row._updateLabel then row._updateLabel() end
+                                  end },
+                            },
+                        })
+                    end)
 
                     end  -- not isCustomInjected
                     end  -- isBuffBar per-icon rows

@@ -1614,6 +1614,23 @@ function ns.RescanThresholdTextFlag()
     end
 end
 
+-- Cooldown Glow at Linked Buff Stacks gate: set ns._cdmAnyCooldownGlowStack once if any
+-- saved spell (any spec) has the cooldown-icon linked-buff-stack glow armed -- per-spell
+-- family stores + bar tiers, every spec. Skips the independent per-spell settings lookup in
+-- RefreshCDMIconAppearance's cooldown-family branch for non-users. Same monotonic,
+-- scanned-once contract as the other Rescan* gates above.
+function ns.RescanCooldownGlowStackFlag()
+    if ns._cdmAnyCooldownGlowStack or ns._cooldownGlowStackFlagScanned then return end
+    if not EllesmereUIDB then return end
+    ns._cooldownGlowStackFlagScanned = true
+    ns.ForEachSavedSettingsBlock(function(ss)
+        if ss.cooldownGlowStackEnabled then
+            ns._cdmAnyCooldownGlowStack = true
+            return true
+        end
+    end)
+end
+
 -- Custom Icon gate: set ns._cdmAnyCustomIcon once if any saved spell (any spec) has a
 -- per-spell replacement icon. Skips the DecorateFrame re-stamp and the RefreshSpellTexture
 -- post-hooks for non-users. Same monotonic, scanned-once contract; customIcon is never written to bar tiers.
@@ -5730,10 +5747,53 @@ local function RefreshCDMIconAppearance(barKey)
                     ns.StackGlow_Configure(icon)
                 end
             end
-        elseif fd and fd.stackGlow and ns.StackGlow_Configure then
-            -- Blizzard viewer frames are pooled across cooldown and buff
-            -- families: retire a controller when its frame goes non-buff.
-            ns.StackGlow_Configure(icon)
+        else
+            -- Cooldown/utility-family icon (not a buff frame): resolve Glow at
+            -- Linked Buff Stacks independently, same pattern as Hide CD Swipe /
+            -- Threshold Text below (own per-spell lookup, own feature-flag
+            -- gate) since there is no ssb here. Feature-flag gated so non-users
+            -- pay zero cost -- no spell-settings lookup at all.
+            local cgThreshold, cgOperator, cgSpellID
+            if ns._cdmAnyCooldownGlowStack and ns.StackGlow_Configure then
+                local cgFc = _ecmeFC[icon]
+                local cgSid = (ns.GetCanonicalSpellIDForFrame and ns.GetCanonicalSpellIDForFrame(icon))
+                    or (cgFc and cgFc.spellID)
+                local cgSs
+                if cgSid and ns.ResolveSpellSettings then
+                    cgSs = ns.ResolveSpellSettings(icon, cgSid, ns.GetBarSpellData(barKey), barKey)
+                end
+                if cgSs and cgSs.cooldownGlowStackEnabled then
+                    local id = tonumber(cgSs.cooldownGlowStackSpellID)
+                    if id and id > 0 then
+                        local t = tonumber(cgSs.cooldownGlowStackThreshold) or 6
+                        if t >= 1 then
+                            cgSpellID = id
+                            cgThreshold = t
+                            cgOperator = cgSs.cooldownGlowStackOperator or "gte"
+                        end
+                    end
+                end
+            end
+            if fd then
+                -- The buff ticker's per-tick gate reads fd._bgThreshold (NOT
+                -- fd.stackGlow.threshold, which StackGlow_Configure owns
+                -- internally) to decide whether to call StackGlow_Feed at all
+                -- -- this has to be set here the same way the buff branch
+                -- above sets it, or the ticker never feeds this icon and the
+                -- glow is configured but never actually lit.
+                fd._bgThreshold = cgThreshold
+                fd._bgStackOperator = cgOperator
+                if cgThreshold then
+                    -- No per-spell Buff Glow concept for cooldown icons to
+                    -- inherit from: always Modern WoW Glow, default color.
+                    ns.StackGlow_Configure(icon, cgThreshold, cgOperator, 6, nil, nil, nil, barData, cgSpellID)
+                elseif fd.stackGlow then
+                    -- Blizzard viewer frames are pooled across cooldown and buff
+                    -- families: retire a controller when its frame goes non-buff
+                    -- (or the setting was just turned off).
+                    ns.StackGlow_Configure(icon)
+                end
+            end
         end
         -- Update texture -- fill the entire frame. The border renders on top via PP.CreateBorder so no inset is needed.
         if tex then
@@ -7805,6 +7865,7 @@ BuildAllCDMBars = function()
     ns.RescanCustomForceCountFlag() -- set the "Show Charges" custom-spell gate (once)
     ns.RescanReverseSwipeFlag()   -- set the Reverse Swipe gate (once) before refresh
     ns.RescanThresholdTextFlag()  -- set the Threshold Text gate (once) before refresh
+    ns.RescanCooldownGlowStackFlag() -- set the Glow at Linked Buff Stacks gate (once) before refresh
     ns.RescanCustomIconFlag()     -- set the per-spell Custom Icon gate (once) before refresh
     ns.RescanActiveGlowFlag()     -- set the Active State Glow gate (once) before refresh
 

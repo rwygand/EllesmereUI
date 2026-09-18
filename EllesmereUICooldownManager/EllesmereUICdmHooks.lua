@@ -123,6 +123,24 @@ do
     -- same secret-safe applications read, off whatever pool frame is active.
     ns._ReadBuffApplications = ReadBuffApplications
 
+    -- Reads a player buff's stack count by a FIXED spell ID instead of the
+    -- icon's own tracked aura. Some cooldown-viewer icons (Implosion's Wild
+    -- Imp counter, confirmed via C_UnitAuras.GetAuraSlots on live data) show
+    -- a stack overlay without Blizzard ever setting auraInstanceID on the
+    -- icon itself, so ReadBuffApplications above finds nothing for them --
+    -- this reads the player's own copy of a known spell ID instead. Same
+    -- secret-safe contract as above: returns a plain number, a SECRET
+    -- number, or nil (no such aura up right now).
+    local function ReadLinkedAuraApplications(spellID)
+        local ok, data = pcall(C_UnitAuras.GetPlayerAuraBySpellID, spellID)
+        if not ok or not data then return nil end
+        local a = data.applications
+        if (issecretvalue and issecretvalue(a)) or a ~= nil then
+            return a
+        end
+        return nil
+    end
+
     local function StartStackGlow(st, width, height)
         -- Both gate masks go over as data: the combat replay of Show Glows Only
         -- in Combat restarts from the recorded opts, so a mask bound out here
@@ -159,7 +177,11 @@ do
     -- (Re)configure or retire an icon's threshold controller. Called from
     -- RefreshCDMIconAppearance with everything pre-resolved; called with only
     -- the icon to tear down (toggle off, frame pooled onto a non-buff spell).
-    function ns.StackGlow_Configure(icon, threshold, operator, style, r, g, b, settings)
+    -- linkedSpellID (optional): when set, Feed reads the player's own aura of
+    -- THIS fixed spell ID instead of the icon's own tracked aura -- for
+    -- cooldown-viewer icons whose native stack overlay isn't backed by an
+    -- auraInstanceID on the icon (see ReadLinkedAuraApplications above).
+    function ns.StackGlow_Configure(icon, threshold, operator, style, r, g, b, settings, linkedSpellID)
         local fd = icon and hookFrameData[icon]
         if not fd then return end
         local st = fd.stackGlow
@@ -219,6 +241,7 @@ do
             or st.background ~= background or st.bgR ~= bgR
             or st.bgG ~= bgG or st.bgB ~= bgB
         st.threshold, st.operator, st.style = threshold, operator, style
+        st.linkedSpellID = tonumber(linkedSpellID)
         st.r, st.g, st.b = r, g, b
         st.lines, st.thickness, st.speed = lines, thickness, speed
         st.background, st.bgR, st.bgG, st.bgB = background, bgR, bgG, bgB
@@ -264,16 +287,36 @@ do
             StopStackGlow(st)
             return
         end
-        local applications = ReadBuffApplications(icon)
-        local secret = issecretvalue and issecretvalue(applications)
-        if not secret then
-            -- Unknown count on an active buff fails OPEN; known counts use the
-            -- selected comparison without touching the secret-value path.
-            if applications == nil then
-                applications = st.openValue
-            elseif not StackGlowMatches(applications, st.operator, st.threshold) then
-                StopStackGlow(st)
-                return
+        local applications
+        if st.linkedSpellID then
+            -- Linked-spell-ID mode: `active` only means the ICON is shown, not
+            -- that the linked buff exists (unlike a real buff-viewer icon,
+            -- where `active` already confirms the buff is up). So an unknown
+            -- count here fails CLOSED -- no aura, no glow -- instead of the
+            -- fail-open behavior below.
+            applications = ReadLinkedAuraApplications(st.linkedSpellID)
+            local secret = issecretvalue and issecretvalue(applications)
+            if not secret then
+                if applications == nil then
+                    StopStackGlow(st)
+                    return
+                elseif not StackGlowMatches(applications, st.operator, st.threshold) then
+                    StopStackGlow(st)
+                    return
+                end
+            end
+        else
+            applications = ReadBuffApplications(icon)
+            local secret = issecretvalue and issecretvalue(applications)
+            if not secret then
+                -- Unknown count on an active buff fails OPEN; known counts use the
+                -- selected comparison without touching the secret-value path.
+                if applications == nil then
+                    applications = st.openValue
+                elseif not StackGlowMatches(applications, st.operator, st.threshold) then
+                    StopStackGlow(st)
+                    return
+                end
             end
         end
         st.gate:SetValue(applications)
@@ -10236,7 +10279,19 @@ function ns.SetupViewerHooks()
                                 -- thresholded icons: route to the gate instead.
                                 if fd and fd._bgThreshold then
                                     glowActive = false
-                                    ns.StackGlow_Feed(frame, buffPresent)
+                                    -- Linked-spell-ID mode (cooldown-viewer icons):
+                                    -- `frame` is not a buff icon so buffPresent is
+                                    -- never true for it -- the icon being SHOWN
+                                    -- (already established by the enclosing
+                                    -- frame:IsShown() check) is what "active" means
+                                    -- here; Feed's own fail-closed applications
+                                    -- check is what actually gates the glow.
+                                    local st = fd.stackGlow
+                                    if st and st.linkedSpellID then
+                                        ns.StackGlow_Feed(frame, true)
+                                    else
+                                        ns.StackGlow_Feed(frame, buffPresent)
+                                    end
                                 end
                                 -- Effective Buff Glow = per-icon override (fd._bgT,
                                 -- stashed by RefreshCDMIconAppearance) falling back to
